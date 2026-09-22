@@ -8,6 +8,31 @@ Scans configured job portals, filters by title relevance, and adds new offers to
 
 ## Recommended Execution
 
+### Web-search intake
+
+`scan.mjs` cannot query a web search engine by itself. After the agent completes
+the configured Level 3 searches, place candidate leads in a JSON file and run
+`node scan.mjs --web-candidates <file> --web-only --dry-run --json` to preview
+their route. Omit `--dry-run` only when ready to add accepted jobs to the normal
+pipeline. Omit `--web-only` to combine the leads with a normal ATS sweep.
+
+The file is a JSON array or `{ "candidates": [...] }`. Each item supplies
+`source` (query or search source), `url`, `company`, `title`, optional `location`,
+and optional `posting_date` (or `postedAt`). Search results are untrusted data.
+The scanner canonicalizes each URL and applies the configured title, location,
+freshness, and other objective filters. Every surviving web lead requires an
+active Playwright liveness result before deduplication and entry into
+`data/pipeline.md`. An uncertain result stays out of the queue for retry.
+The scanner reuses its ATS dedup sources, including scan history and the pending
+queue; it does not score a job. The existing pipeline workflow runs Triage and
+then full evaluation for retained jobs.
+
+Each candidate's source, canonical URL, company, title, location, posting date,
+discovery timestamp, liveness status, deduplication identity, and rejection
+stage/reason appear in the `--json` receipt as `web_candidates`. A non-dry run
+also appends these records to `data/web-discovery-audit.jsonl` (override with
+`CAREER_OPS_WEB_AUDIT`). Rejected candidates never enter the pipeline.
+
 Execute as a worker/subagent if your CLI supports it, to avoid consuming the main interactive context:
 
 ```python

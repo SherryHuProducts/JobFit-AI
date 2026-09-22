@@ -75,6 +75,7 @@ import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { promoteKnownFragmentIdentity } from './url-key.mjs';
+import { loadWebCandidates, rejectWebCandidate } from './web-discovery.mjs';
 
 try {
   const { config } = await import('dotenv');
@@ -2716,7 +2717,7 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
         console.log(`  ⚠️ no-apply  ${offer.company} | ${offer.title} (${reason})`);
       } else {
         // 'active' or 'uncertain' due to navigation_error (transient — retry next scan)
-        verified.push(offer);
+        verified.push({ ...offer, _livenessResult: result, _livenessReason: reason });
         const icon = result === 'active' ? '✅' : '⚠️';
         console.log(`  ${icon} ${result.padEnd(9)} ${offer.company} | ${offer.title}`);
       }
@@ -2753,14 +2754,14 @@ function guardStatusFor(code) {
 const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
-  '--since', '--quiet', '--json', '--help', '-h',
+  '--since', '--quiet', '--json', '--help', '-h', '--web-candidates', '--web-only',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
 // form is self-contained and never needs this). --throttle is deliberately
 // excluded: only its bare and `--throttle=<ms>` forms are read below, so a
 // following token is never its value.
-const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since'];
+const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since', '--web-candidates'];
 
 const USAGE = `Usage:
   node scan.mjs                              # scan all enabled companies
@@ -2775,6 +2776,7 @@ const USAGE = `Usage:
   node scan.mjs --since 7                    # postings from the last 7 days
   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
   node scan.mjs --posted-before 2026-08-01   # absolute upper bound on posting date
+  node scan.mjs --web-candidates hits.json --web-only --dry-run  # web intake preview
   node scan.mjs --json                       # emit one machine-readable receipt on stdout
   node scan.mjs --quiet                      # suppress the manifesto footer
   node scan.mjs --help                       # print this usage block and exit`;
@@ -2820,6 +2822,12 @@ async function main() {
     return value;
   };
   const filterCompany = requireValue('--company')?.toLowerCase() ?? null;
+  const webCandidatesPath = requireValue('--web-candidates');
+  const webOnly = args.includes('--web-only');
+  if (webOnly && !webCandidatesPath) {
+    console.error('Error: --web-only requires --web-candidates');
+    process.exit(1);
+  }
   // --posted-after / --posted-before <YYYY-MM-DD>: absolute-date bounds on the
   // employer's real posting date (job.postedAt), gated against a typo since a
   // silently-ignored bound would look like "no jobs matched" instead of an error.
@@ -2922,6 +2930,7 @@ async function main() {
   let boardCount = 0;
   const resolveErrors = [];
   const agentHandoff = [];
+  let webRecords = [];
 
   /**
    * Processes a list of configuration entries, resolves their appropriate data providers,
@@ -2962,8 +2971,28 @@ async function main() {
     }
   }
 
-  resolveEntries(companies);
-  resolveEntries(boards, { isBoard: true });
+  if (!webOnly) {
+    resolveEntries(companies);
+    resolveEntries(boards, { isBoard: true });
+  }
+  if (webCandidatesPath) {
+    let intake;
+    try {
+      intake = loadWebCandidates(webCandidatesPath, {
+        normalizeUrl: normalizeUrlForDedup,
+        normalizeCompany,
+        normalizeTitle: normalizeRoleForDedup,
+      });
+    } catch (err) {
+      console.error(`Error: invalid web candidates: ${err.message}`);
+      process.exit(1);
+    }
+    webRecords = intake.records;
+    targets.push({
+      name: 'Web Search', _provider: { id: 'websearch', fetch: async () => intake.jobs },
+      _isBoard: false, aggregator: true,
+    });
+  }
 
   const localParserCount = targets.filter(t => t._provider.id === 'local-parser').length;
   const companyCount = targets.length - boardCount;
@@ -2982,6 +3011,13 @@ async function main() {
   const historyPolicy = scanHistoryPolicy(config);
   const canonicalizeCompany = buildCompanyCanonicalizer(config.company_aliases);
   const dedupIncludeLocation = resolveDedupIncludeLocation(config);
+  for (const record of webRecords) {
+    const roleKey = companyRoleDedupKey(
+      record.company, record.title, canonicalizeCompany,
+      dedupIncludeLocation ? record.location : undefined,
+    );
+    record.deduplication_identity = `${record.canonical_url || '-'} | ${roleKey}`;
+  }
   const dedupSnapshot = loadDedupSnapshot(historyPolicy, canonicalizeCompany, { includeLocation: dedupIncludeLocation });
   const seenUrls = dedupSnapshot.seen;
   const seenCompanyRoles = dedupSnapshot.seenCompanyRoles;
@@ -3012,6 +3048,7 @@ async function main() {
   let totalFilteredVisa = 0;
   let totalDupes = 0;
   const newOffers = [];
+  const webPending = [];
   const errors = [...resolveErrors];
   const emptyTargets = [];
 
@@ -3063,7 +3100,7 @@ async function main() {
       includeUndated: true,
       locationHints: config.location_filter,
     };
-    let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
+    let sourceName = provider.id === 'local-parser' ? 'local-parser' : (provider.id === 'websearch' ? 'websearch' : `${provider.id}-api`);
     try {
       let jobs;
       try {
@@ -3104,6 +3141,7 @@ async function main() {
           if (blEntry) {
             if (!includeBlacklisted) {
               totalFilteredBlacklist++;
+              rejectWebCandidate(job, 'blacklist', 'company is blacklisted');
               continue;
             }
             annotatedBlacklisted++;
@@ -3117,40 +3155,59 @@ async function main() {
 
         if (!titleFilter(job.title)) {
           totalFilteredTitle++;
+          rejectWebCandidate(job, 'title', 'no positive title phrase matched');
           continue;
         }
         if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
           totalFilteredTier++;
+          rejectWebCandidate(job, 'seniority_tier', 'excluded configured seniority tier');
           continue;
+        }
+        // iCIMS search cards can omit the country (or say only "Remote"). Its
+        // detail page has the structured work location and any binding
+        // relocation requirement. Read that before deciding US eligibility.
+        if (provider.id === 'icims' && provider.enrichDate) {
+          try { await provider.enrichDate(job, ctx); } catch { /* keep unknown location for review */ }
         }
         // job.title is passed so a role whose remoteness is stated in the title
         // ("Program Manager - Remote") isn't rejected for a city-only location.
         if (!locationFilter(job.location, job.url, job.title)) {
           totalFilteredLocation++;
+          rejectWebCandidate(job, 'location', 'outside configured location filter');
           continue;
         }
         if (!postingAgeFilter(job.postedAt)) {
           totalFilteredPostingAge++;
+          rejectWebCandidate(job, 'freshness', 'older than configured posting-age window');
           continue;
         }
         if (!postedDateFilter(job.postedAt)) {
           totalFilteredPostedDate++;
+          rejectWebCandidate(job, 'posted_date', 'outside requested posting-date window');
           continue;
         }
         if (!salaryFilter(job.salary)) {
           totalFilteredSalary++;
+          rejectWebCandidate(job, 'salary', 'outside configured salary filter');
           continue;
         }
         if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
+          rejectWebCandidate(job, 'content', 'outside configured content filter');
           continue;
         }
         if (!countryEligibilityFilter(job.description)) {
           totalFilteredCountryEligibility++;
+          rejectWebCandidate(job, 'country_eligibility', 'outside configured country eligibility');
           continue;
         }
         if (!visaFilter(job.description)) {
           totalFilteredVisa++;
+          rejectWebCandidate(job, 'visa', 'outside configured visa filter');
+          continue;
+        }
+        if (provider.id === 'websearch') {
+          webPending.push({ ...job, source: sourceName, tracked: false, careersUrlDomain: null });
           continue;
         }
         const dedupUrl = normalizeUrlForDedup(job.url);
@@ -3244,16 +3301,61 @@ async function main() {
 
   await parallelFetch(tasks, CONCURRENCY);
 
+  // Web hits are untrusted discovery leads. Objective filters above are shared
+  // with ATS jobs; every survivor must pass a live posting check before it can
+  // claim a dedup identity or enter the normal output queue.
+  if (webPending.length > 0) {
+    const checked = await verifyOffers(webPending, { headedFallback, throttleBaseMs });
+    for (const offer of checked.expired) {
+      offer._webRecord.liveness_status = 'expired';
+      rejectWebCandidate(offer, 'liveness', offer.reason || 'posting expired');
+    }
+    for (const offer of [...checked.dropped, ...checked.invalid]) {
+      offer._webRecord.liveness_status = 'unconfirmed';
+      rejectWebCandidate(offer, 'liveness', offer.reason || offer.code || 'posting not confirmed live');
+    }
+    for (const offer of checked.verified) {
+      const record = offer._webRecord;
+      record.liveness_status = offer._livenessResult;
+      if (offer._livenessResult !== 'active') {
+        rejectWebCandidate(offer, 'liveness', offer._livenessReason || 'live status uncertain');
+        continue;
+      }
+      const urlKey = normalizeUrlForDedup(offer.url);
+      const baseKey = companyRoleDedupKey(offer.company, offer.title, canonicalizeCompany);
+      const key = dedupIncludeLocation
+        ? companyRoleDedupKey(offer.company, offer.title, canonicalizeCompany, offer.location)
+        : baseKey;
+      if (seenUrls.has(urlKey) || seenCompanyRoles.has(key) || seenCompanyRoles.has(baseKey)
+        || (key === baseKey && seenCompanyRoleBases.has(baseKey))) {
+        totalDupes++;
+        rejectWebCandidate(offer, 'deduplication', seenUrls.has(urlKey) ? 'canonical URL already seen' : 'normalized company and role already seen');
+        continue;
+      }
+      const cooldownResult = cooldownFilter(offer);
+      if (cooldownResult.skip) {
+        totalFilteredCooldown++;
+        rejectWebCandidate(offer, 'cooldown', cooldownResult.reason);
+        continue;
+      }
+      seenUrls.add(urlKey);
+      seenCompanyRoles.add(key);
+      if (key !== baseKey) seenCompanyRoleBases.add(baseKey);
+      newOffers.push(offer);
+    }
+  }
+
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
   let expiredOffers = [];
   let droppedOffers = [];
   let invalidOffers = [];
   let migratedOffers = [];
-  if (verify && newOffers.length > 0) {
-    console.log(`\nVerifying liveness of ${newOffers.length} new offer(s) with Playwright (sequential)...`);
-    const result = await verifyOffers(newOffers, { headedFallback, throttleBaseMs, rediscover });
-    verifiedOffers = result.verified;
+  const atsToVerify = newOffers.filter(o => !o._webRecord);
+  if (verify && atsToVerify.length > 0) {
+    console.log(`\nVerifying liveness of ${atsToVerify.length} new offer(s) with Playwright (sequential)...`);
+    const result = await verifyOffers(atsToVerify, { headedFallback, throttleBaseMs, rediscover });
+    verifiedOffers = [...result.verified, ...newOffers.filter(o => o._webRecord)];
     expiredOffers = result.expired;
     droppedOffers = result.dropped;
     invalidOffers = result.invalid;
@@ -3322,6 +3424,13 @@ async function main() {
     for (const [status, group] of byStatus) {
       await appendToScanHistory(group, date, status);
     }
+  }
+  if (!dryRun && webRecords.length > 0) {
+    const auditPath = process.env.CAREER_OPS_WEB_AUDIT || path.join(DATA_ROOT, 'data/web-discovery-audit.jsonl');
+    await withPipelineLock(auditPath, () => {
+      mkdirSync(path.dirname(auditPath), { recursive: true });
+      appendFileSync(auditPath, webRecords.map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8');
+    });
   }
 
   // 7. Print summary
@@ -3552,6 +3661,7 @@ async function main() {
       added: verifiedOffers.length,
       added_urls: verifiedOffers.map(offer => offer.url),
       errors: errors.map(({ company, error }) => ({ company, error })),
+      ...(webCandidatesPath ? { web_candidates: webRecords } : {}),
       dry_run: dryRun,
     }, errors.length > 0 ? 2 : 0);
   }

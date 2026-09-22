@@ -1,5 +1,11 @@
 # Personal data (user fills these)
 cv.md
+source_resumes/
+private/
+personal/
+*Master Career Facts*
+*.pdf
+*.docx
 article-digest.md
 local/
 # Everything under data/ is generated or personal at runtime — only .gitkeep
@@ -78,6 +84,17 @@ plugins.lock
 
 # Secrets (never commit — use .env.example as template)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+.career-ops-data
+.npmrc
+.netrc
+*.p12
+*.pfx
 # Universal safety net — protects ALL checkouts/branches, incl. untracked subprojects
 # (e.g. web/ before it graduates to main). Never commit local env files or TS build caches.
 **/.env.local
@@ -93,6 +110,9 @@ bun.lock
 # run interrupted mid-way leaves ~650MB of duplicated repo behind, which a
 # reflexive `git add .` would then stage as ~1000 new files.
 .tmp-script-test-*/
+*.log
+tmp/
+temp/
 
 # Report-number reservation sentinels (ephemeral, created by reserve-report-num.mjs)
 reports/*-RESERVED.md
@@ -191,6 +211,17 @@ plan/
 # (see DATA_CONTRACT.md). Re-include them past the unanchored user-layer
 # patterns above (cv.md, portals.yml).
 !test-fixtures/**
+# Keep secrets and personal documents ignored even under fixture paths.
+test-fixtures/**/.env
+test-fixtures/**/.env.*
+test-fixtures/**/*.pem
+test-fixtures/**/*.key
+test-fixtures/**/*.p12
+test-fixtures/**/*.pfx
+test-fixtures/**/credentials.json
+test-fixtures/**/secrets.json
+test-fixtures/**/*.pdf
+test-fixtures/**/*.docx
 
 # Profile intake sources (master CV / LinkedIn export / diplomas / references
 # — user PII, never commit). Ship only the system-owned scaffold. #1723

@@ -228,6 +228,25 @@ const mkCtx = (pages) => ({
   if (job.location === 'Annapolis Junction, MD, United States') pass('enrichDate fills an empty location from jobLocation');
   else fail(`location: ${job.location}`);
 }
+// A "Remote" search card must not hide a binding foreign relocation requirement.
+{
+  const posting = { '@type': 'JobPosting', jobLocation: { address: { addressCountry: 'OM' } },
+    description: 'The role is based in Oman and Nortal offers support in the relocation process!' };
+  const job = { title: 'Project Manager', url: `${ORIGIN}/jobs/6345/project-manager/job`, location: 'Remote' };
+  await icims.enrichDate(job, { fetchText: async () => `<script type="application/ld+json">${JSON.stringify(posting)}</script>` });
+  if (job.location === 'OM') pass('foreign relocation overrides a Remote search-card label');
+  else fail(`foreign relocation location: ${JSON.stringify(job.location)}`);
+}
+// A US option in a multi-country posting preserves the original Remote label.
+{
+  const posting = { '@type': 'JobPosting', jobLocation: [
+    { address: { addressCountry: 'OM' } }, { address: { addressCountry: 'US' } }],
+    description: 'The role is based in Oman and we offer support in the relocation process!' };
+  const job = { title: 'Project Manager', url: `${ORIGIN}/jobs/6346/project-manager/job`, location: 'Remote' };
+  await icims.enrichDate(job, { fetchText: async () => `<script type="application/ld+json">${JSON.stringify(posting)}</script>` });
+  if (job.location === 'Remote') pass('US option is preserved on a multi-country posting');
+  else fail(`multi-country location: ${JSON.stringify(job.location)}`);
+}
 {
   const detail = `<script type="application/ld+json">{"@type":"JobPosting","jobLocation":{"@type":"Place","address":{"@type":"PostalAddress","addressCountry":"CA","addressLocality":"Toronto","addressRegion":"ON"}}}</script>`;
   const job = { title: 'X', url: `${ORIGIN}/jobs/1234/x/job`, company: 'acmefreight', location: 'N/A' };

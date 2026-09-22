@@ -166,10 +166,21 @@ export default {
     }
     const ts = Date.parse(pickDatePosted(nodes) || '');
     if (!Number.isNaN(ts)) job.postedAt = ts;
-    if (!String(job.location || '').trim() || /^n\/?a$/i.test(String(job.location).trim())) {
-      const loc = pickLocation(nodes);
-      if (loc) job.location = loc;
-    }
+    const loc = pickLocation(nodes);
+    const missingLocation = !String(job.location || '').trim() || /^n\/?a$/i.test(String(job.location).trim());
+    // A search card's "Remote" label cannot rescue a role whose detail page
+    // explicitly places it abroad and offers relocation there. Keep genuine
+    // multi-country postings: a US option means the role is not foreign-only.
+    const countries = nodes.flatMap(node => {
+      const places = Array.isArray(node?.jobLocation) ? node.jobLocation : node?.jobLocation ? [node.jobLocation] : [];
+      return places.map(place => String(place?.address?.addressCountry || '').trim().toUpperCase()).filter(Boolean);
+    });
+    const detailText = nodes.map(node => String(node?.description || '')).join(' ')
+      .replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+    const foreignRelocation = countries.length > 0 && countries.every(country => country !== 'US')
+      && /\b(?:role|position|job)\s+is\s+based\s+in\b/i.test(detailText)
+      && /\b(?:relocation (?:is )?required|must relocate|support (?:in|with|for) (?:the )?relocation)\b/i.test(detailText);
+    if (loc && (missingLocation || foreignRelocation)) job.location = loc;
   },
 };
 
