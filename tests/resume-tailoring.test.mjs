@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { buildDraft as buildEngineDraft, verifyClaim, sourceStatement } from '../resume-tailoring/engine.mjs';
 import { persistHandoff, selectedJob } from '../evaluation-handoff.mjs';
 import { renderHtml } from '../resume-tailoring/render.mjs';
+import { validateDocx } from '../resume-tailoring/presentation.mjs';
 
 const cv = `# Fictional Candidate
 ## Experience
@@ -208,7 +209,7 @@ test('DOCX preview uses the same validated content and no tables or images', () 
   const check = spawnSync('python3', ['-c', 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); s=z.read("word/document.xml").decode(); assert "Coordinated implementation projects" in s; assert "<w:tbl>" not in s; assert "<w:drawing>" not in s', docx], { encoding: 'utf8' });
   assert.equal(check.status, 0, check.stderr);
 });
-test('CLI writes a private draft and cannot approve without a one-page PDF and human review', () => {
+test('DOCX-only CLI succeeds without fc-match, preserves content and Arial, and retains approval gates', () => {
   const root = mkdtempSync(join(tmpdir(), 'jobfit-cli-'));
   mkdirSync(join(root, 'reports')); mkdirSync(join(root, 'data')); mkdirSync(join(root, 'config'));
   writeFileSync(join(root, 'cv.md'), cv);
@@ -220,16 +221,36 @@ test('CLI writes a private draft and cannot approve without a one-page PDF and h
   const selected = selectedJob(root, companion, input.facts, 'APPLY');
   const inputPath = join(root, 'data', 'selected-job.json');
   writeFileSync(inputPath, JSON.stringify(selected));
-  const env = { ...process.env, CAREER_OPS_ROOT: root };
-  const drafted = spawnSync('node', ['resume-tailoring.mjs', 'draft', inputPath, '--docx'], { env, encoding: 'utf8' });
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+  assert.equal(python.status, 0, python.stderr);
+  symlinkSync(python.stdout.trim(), join(bin, 'python3'));
+  const env = { ...process.env, CAREER_OPS_ROOT: root, PATH: bin };
+  assert.equal(spawnSync('fc-match', [], { env }).error?.code, 'ENOENT');
+  const drafted = spawnSync(process.execPath, ['resume-tailoring.mjs', 'draft', inputPath, '--docx'], { env, encoding: 'utf8' });
   assert.equal(drafted.status, 0, drafted.stderr);
   const receipt = JSON.parse(drafted.stdout);
   assert.equal(receipt.state, 'draft');
   assert.equal(existsSync(join(receipt.directory, 'draft.docx')), true);
   assert.equal(existsSync(join(receipt.directory, 'final')), false);
+  assert.equal(existsSync(join(receipt.directory, 'draft.pdf')), false);
+  const savedDraft = JSON.parse(readFileSync(join(receipt.directory, 'draft.json'), 'utf8'));
+  const expected = buildEngineDraft(selected, { cvText: cv, reportText: readFileSync(join(root, input.evaluation.report_path), 'utf8') });
+  assert.deepEqual(expected.errors, []);
+  assert.deepEqual(savedDraft.content, expected.draft.content);
+  assert.deepEqual(savedDraft.ledger, expected.draft.ledger);
+  assert.deepEqual(savedDraft.evidence_map, expected.draft.evidence_map);
+  const header = JSON.parse(readFileSync(join(receipt.directory, 'contact.json'), 'utf8'));
+  validateDocx(savedDraft, header, join(receipt.directory, 'draft.docx'));
+  const inspect = spawnSync('python3', ['resume-tailoring/render_docx.py', '--inspect', join(receipt.directory, 'draft.docx')], { env, encoding: 'utf8' });
+  assert.equal(inspect.status, 0, inspect.stderr);
+  const fonts = [...JSON.parse(inspect.stdout).styles.matchAll(/:(?:ascii|hAnsi|cs)="([^"]+)"/g)].map(match => match[1]);
+  assert.ok(fonts.length > 0);
+  assert.ok(fonts.every(font => font === 'Arial'));
   const review = JSON.parse(readFileSync(join(receipt.directory, 'review.json'), 'utf8'));
   assert.equal(review.state, 'draft');
-  const premature = spawnSync('node', ['resume-tailoring.mjs', 'approve', receipt.directory, '--human-approved=Reviewer'], { env, encoding: 'utf8' });
+  const premature = spawnSync(process.execPath, ['resume-tailoring.mjs', 'approve', receipt.directory, '--human-approved=Reviewer'], { env, encoding: 'utf8' });
   assert.notEqual(premature.status, 0);
   assert.match(premature.stderr, /one-page PDF verification/);
 });

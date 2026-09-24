@@ -9,7 +9,7 @@ import { verifyFacts } from './verify-cv-facts.mjs';
 import { auditAts } from './verify-ats.mjs';
 import { buildDraft } from './resume-tailoring/engine.mjs';
 import { renderHtml } from './resume-tailoring/render.mjs';
-import { renderCanonical, validateFont } from './resume-tailoring/presentation.mjs';
+import { renderCanonical } from './resume-tailoring/presentation.mjs';
 import { load as loadYaml } from 'js-yaml';
 import { candidateContact } from './resume-tailoring/contact.mjs';
 import { validateSelectedJob } from './evaluation-handoff.mjs';
@@ -100,7 +100,8 @@ async function draftCommand(inputPath, { docx = false, pdf = false } = {}) {
   writeFileSync(join(dir, 'review-summary.md'), reviewLines.join('\n'), { mode: 0o600 });
   save(join(dir, 'review.json'), { state: 'draft', approved_at: null, approved_by: null, draft_sha256: sha(JSON.stringify(result.draft)), html_sha256: sha(html), pdf_sha256: null, docx_sha256: null, pdf_pages: null, docx_page_count: 'unverified' });
   if (docx && !pdf) {
-    validateFont();
+    // DOCX declares Arial in its styles; host font inspection is only needed
+    // for automated rendering, which renderCanonical validates separately.
     renderDocx(join(dir, 'draft.json'), join(dir, 'contact.json'), join(dir, 'draft.docx'));
   }
   if (docx && !pdf) { const review = readJson(join(dir, 'review.json')); review.docx_sha256 = sha(readFileSync(join(dir, 'draft.docx'))); save(join(dir, 'review.json'), review); }

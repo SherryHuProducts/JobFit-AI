@@ -60,8 +60,20 @@ test('standard and compact DOCX styles have exact approved sizes and margins', (
   }
 });
 test('Arial availability check rejects a substituted family', () => {
-  assert.equal(validateFont().family, 'Arial');
-  assert.throws(() => validateFont({ match: 'false' }), /FONT_ENVIRONMENT/);
+  const dir = temp();
+  const match = join(dir, 'fc-match');
+  const font = join(dir, 'font.ttf');
+  writeFileSync(font, 'synthetic font-path fixture');
+  writeFileSync(match, `#!/bin/sh\nprintf 'Arial|%s\\n' '${font}'\n`, { mode: 0o700 });
+  assert.equal(validateFont({ match }).family, 'Arial');
+  writeFileSync(match, `#!/bin/sh\nprintf 'Substituted Family|%s\\n' '${font}'\n`, { mode: 0o700 });
+  assert.throws(() => validateFont({ match }), /FONT_ENVIRONMENT.*Arial font file is unavailable/);
+  assert.throws(() => validateFont({ match, exists: () => false }), /FONT_ENVIRONMENT/);
+});
+test('explicit font validation reports unavailable fc-match', () => {
+  const fontCheck = () => validateFont({ match: join(temp(), 'missing-fc-match') });
+  assert.throws(fontCheck, /FONT_ENVIRONMENT.*ENOENT/);
+  assert.throws(() => renderCanonical(draft(), contact, temp(), { fontCheck }), /FONT_ENVIRONMENT.*ENOENT/);
 });
 test('private output is gitignored and non-private repository output is rejected', () => {
   const root = process.cwd();
