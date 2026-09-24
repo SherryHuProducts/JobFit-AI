@@ -53,6 +53,7 @@ These files contain your personal data, customizations, and work product. Update
 | `writing-samples/*` | Your personal writing samples for style calibration (except `writing-samples/README.md`, which is system-owned documentation delivered by updates) |
 | `reports/*` | Your evaluation reports |
 | `output/*` | Your generated PDFs |
+| `output/resume-tailoring/*` | JobFit AI's private, versioned resume drafts, JD evidence maps, claim ledgers, approval records, and optional final PDF/DOCX artifacts; ignored by Git |
 | `jds/*` | Your saved job descriptions |
 
 ### Fork-local paths
@@ -192,5 +193,4 @@ When resolved, all User Layer files/directories (e.g. `cv.md`, `config/profile.y
 - **`CAREER_OPS_TRACKER`** can be set to override the applications tracker file path directly (relative paths are resolved relative to the repository root).
 - **Read Resolution:** If no tracker override is set, reading resolves to `{DATA_ROOT}/data/applications.md` if it exists; otherwise falls back to `{DATA_ROOT}/applications.md`.
 - **Write Resolution:** All writes (including merge operations and first-run creation) target the canonical location `{DATA_ROOT}/data/applications.md`.
-
 

@@ -111,6 +111,8 @@ bun.lock
 # reflexive `git add .` would then stage as ~1000 new files.
 .tmp-script-test-*/
 *.log
+__pycache__/
+*.pyc
 tmp/
 temp/
 
@@ -231,3 +233,8 @@ documents/*
 # Intake fingerprints — the recorded source filenames may themselves carry
 # PII (e.g. cv/jane-doe-master-cv.pdf). #1723
 data/intake-state.json
+
+# Local environment declarations may contain machine-specific paths or credentials.
+.envrc
+# Validated evaluation companions are private production artifacts, like their reports.
+reports/*.handoff.json

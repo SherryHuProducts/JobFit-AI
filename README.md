@@ -79,6 +79,7 @@ The system surfaces options, reasons, and uncertainty. It does not turn a discov
 | Liveness and deduplication | Web-lead verification, native pipeline sweep, URL normalization, and cross-source duplicate checks |
 | Triage | Lightweight routing before full evaluation |
 | Rubric V1.2 | 0–100 Fit Score, separate gap analysis, and recommendation layer |
+| Resume Tailoring Engine | Human-selected, V1.2-guided private drafts with source-linked claims, a stable one-column template, HTML/PDF/DOCX previews, and explicit approval state |
 | Prospective validation | A normal prospective scan and liveness sweep have been run; scan anomalies were reported separately. This does not imply every queued lead has received a V1.2 evaluation. |
 
 The scanner, Triage, and rubric are distinct stages. Running a scan alone does not complete the later stages.
@@ -95,6 +96,7 @@ The JobFit AI V1.2 rules and targeting live in local, ignored user-layer files; 
 | `data/pipeline.md`, `data/scan-history.tsv` | Local job queue and discovery history; ignored by Git |
 | `reports/`, `jds/` | Local evaluation reports and archived postings; generated content is ignored by Git |
 | `tests/` | Scanner, provider, and workflow checks |
+| `resume-tailoring.mjs`, `resume-tailoring/` | Evidence-checked draft engine and canonical HTML/DOCX presentation layer |
 | `LICENSE`, `DATA_CONTRACT.md` | Upstream license and user/system data boundaries |
 
 ## 11. Running / Testing
@@ -116,10 +118,13 @@ node scan.mjs --web-candidates /path/to/leads.json --web-only --dry-run --json
 
 A normal prospective scan is `node scan.mjs --json`. It writes retained leads to the local pipeline. Then run the liveness sweep, Triage, and full V1.2 evaluation through the configured agent workflow. The scan command alone does not run Triage or V1.2.
 
+After a human selects an evaluated job, prepare a private requirement-and-fact mapping as described in [`modes/resume-tailoring.md`](modes/resume-tailoring.md). `node resume-tailoring.mjs draft data/selected-job.json --docx --pdf` writes a versioned draft under ignored `output/`. A verified one-page PDF and explicit human approval are required before final export. DOCX pagination still needs visual review in Word or a compatible editor; no application is submitted.
+
 Relevant checks include:
 
 ```bash
 node --test tests/web-discovery.test.mjs
+node --test tests/resume-tailoring.test.mjs
 node validate-portals.mjs
 npm run lint
 ```
@@ -132,7 +137,7 @@ Personal CVs, source resumes, profile details, pipeline and application history,
 
 These are **planned JobFit AI workflow integrations**, not claims of completed behavior:
 
-- Targeted resume generation after a human chooses a role.
+- More flexible, human-reviewed wording transformations that retain source-level provenance.
 - A reviewed application workflow after the human decides to apply. Automated application submission is not part of the current system.
 - Additional automation for discovery scheduling, handoffs, and anomaly reporting.
 

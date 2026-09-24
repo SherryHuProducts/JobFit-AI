@@ -1,0 +1,34 @@
+{
+  "canonical_job_id": "fixture:example-finance-manager",
+  "canonical_url": "https://example.invalid/example-finance-manager",
+  "company": "Example Systems",
+  "title": "Finance Operations Manager",
+  "triage_result": "PASS",
+  "primary_track": "C",
+  "fit_score_100": 62,
+  "machine_score_5": 3.1,
+  "gap_severity": "HIGH",
+  "controlling_gap": "Unverified enterprise software rollout ownership",
+  "recommendation": "REVIEW / SELECTIVE APPLY",
+  "evaluation_timestamp": "2026-09-23T12:00:00Z",
+  "rubric_version": "1.2",
+  "requirements": [
+    {
+      "id": "r1",
+      "text": "Analyze department budgets",
+      "importance": "high",
+      "status": "partial",
+      "evidence_level": "transferable_professional",
+      "evidence_ids": [
+        "f1"
+      ]
+    },
+    {
+      "id": "r2",
+      "text": "Own enterprise software rollout budgets",
+      "importance": "high",
+      "status": "missing",
+      "evidence_ids": []
+    }
+  ]
+}

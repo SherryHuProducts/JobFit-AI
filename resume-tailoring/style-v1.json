@@ -1,0 +1,42 @@
+{
+  "version": "1.0",
+  "font": "Arial",
+  "libreoffice_version": "26.8",
+  "page": { "width_twips": 12240, "height_twips": 15840, "margin_twips": 893 },
+  "common": {
+    "name_pt": 17,
+    "section_pt": 10.5,
+    "entry_pt": 10.5,
+    "contact_pt": 9,
+    "date_pt": 9,
+    "bullet_left_twips": 432,
+    "bullet_hanging_twips": 173,
+    "date_tab_twips": 10454,
+    "ink": "171717",
+    "rule": "999999"
+  },
+  "standard": {
+    "body_pt": 10.5,
+    "line_percent": 115,
+    "name_after_pt": 4,
+    "contact_after_pt": 8,
+    "section_before_pt": 9,
+    "section_after_pt": 4,
+    "entry_before_pt": 5,
+    "entry_after_pt": 2,
+    "bullet_after_pt": 3,
+    "body_after_pt": 4
+  },
+  "compact": {
+    "body_pt": 10,
+    "line_percent": 110,
+    "name_after_pt": 3,
+    "contact_after_pt": 6,
+    "section_before_pt": 7,
+    "section_after_pt": 3,
+    "entry_before_pt": 3,
+    "entry_after_pt": 1,
+    "bullet_after_pt": 1,
+    "body_after_pt": 2
+  }
+}
