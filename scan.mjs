@@ -76,6 +76,7 @@ import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { promoteKnownFragmentIdentity } from './url-key.mjs';
 import { loadWebCandidates, rejectWebCandidate } from './web-discovery.mjs';
+import { scanAudit } from './scan-service/audit.mjs';
 
 try {
   const { config } = await import('dotenv');
@@ -121,7 +122,8 @@ try {
   process.exit(1);
 }
 
-const CONCURRENCY = 10;
+const CONCURRENCY = process.env.CAREER_OPS_SCAN_CONCURRENCY === '2' ? 2 : 10;
+const auditJob = scanAudit(process.env.CAREER_OPS_SCAN_AUDIT, DATA_ROOT);
 
 export function isIgnorableDirectoryFsyncError(err, platform = process.platform) {
   return ['EINVAL', 'ENOTSUP', 'ENOSYS'].includes(err?.code)
@@ -3126,171 +3128,190 @@ async function main() {
       }
 
       for (const job of jobs) {
-        // Trust enrichment — runs before filters, never drops
-        const trustResult = trustValidator(job);
-        job.trustScore = trustResult.score;
-        job.trustFlags = trustResult.flags;
-        job.trustLevel = trustResult.level;
+        let auditSelection = 'DEFERRED', auditReason = 'SCANNER_INTERRUPTED';
+        try {
+          // Trust enrichment — runs before filters, never drops
+          const trustResult = trustValidator(job);
+          job.trustScore = trustResult.score;
+          job.trustFlags = trustResult.flags;
+          job.trustLevel = trustResult.level;
 
-        // Company blacklist (#1742) — the user's own do-not-apply decision,
-        // checked first: it's company-level, not a per-posting signal. Never
-        // silent: skips are counted and reported in the run summary, and
-        // --include-blacklisted lets the posting through annotated instead.
-        if (blacklist.size > 0) {
-          const blEntry = blacklist.get(normalizeCompany(job.company || company.name || ''));
-          if (blEntry) {
-            if (!includeBlacklisted) {
-              totalFilteredBlacklist++;
-              rejectWebCandidate(job, 'blacklist', 'company is blacklisted');
-              continue;
+          // Company blacklist (#1742) — the user's own do-not-apply decision,
+          // checked first: it's company-level, not a per-posting signal. Never
+          // silent: skips are counted and reported in the run summary, and
+          // --include-blacklisted lets the posting through annotated instead.
+          if (blacklist.size > 0) {
+            const blEntry = blacklist.get(normalizeCompany(job.company || company.name || ''));
+            if (blEntry) {
+              if (!includeBlacklisted) {
+                auditSelection = 'FILTERED'; auditReason = 'blacklist: company is blacklisted';
+                totalFilteredBlacklist++;
+                rejectWebCandidate(job, 'blacklist', 'company is blacklisted');
+                continue;
+              }
+              annotatedBlacklisted++;
+              job.blacklisted = true;
+              const label = `blacklisted${blEntry.reason ? `: ${blEntry.reason}` : ''}`;
+              job.note = typeof job.note === 'string' && job.note.trim()
+                ? `${label} — ${job.note}`
+                : label;
             }
-            annotatedBlacklisted++;
-            job.blacklisted = true;
-            const label = `blacklisted${blEntry.reason ? `: ${blEntry.reason}` : ''}`;
-            job.note = typeof job.note === 'string' && job.note.trim()
-              ? `${label} — ${job.note}`
-              : label;
           }
-        }
 
-        if (!titleFilter(job.title)) {
-          totalFilteredTitle++;
-          rejectWebCandidate(job, 'title', 'no positive title phrase matched');
-          continue;
-        }
-        if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
-          totalFilteredTier++;
-          rejectWebCandidate(job, 'seniority_tier', 'excluded configured seniority tier');
-          continue;
-        }
-        // iCIMS search cards can omit the country (or say only "Remote"). Its
-        // detail page has the structured work location and any binding
-        // relocation requirement. Read that before deciding US eligibility.
-        if (provider.id === 'icims' && provider.enrichDate) {
-          try { await provider.enrichDate(job, ctx); } catch { /* keep unknown location for review */ }
-        }
-        // job.title is passed so a role whose remoteness is stated in the title
-        // ("Program Manager - Remote") isn't rejected for a city-only location.
-        if (!locationFilter(job.location, job.url, job.title)) {
-          totalFilteredLocation++;
-          rejectWebCandidate(job, 'location', 'outside configured location filter');
-          continue;
-        }
-        if (!postingAgeFilter(job.postedAt)) {
-          totalFilteredPostingAge++;
-          rejectWebCandidate(job, 'freshness', 'older than configured posting-age window');
-          continue;
-        }
-        if (!postedDateFilter(job.postedAt)) {
-          totalFilteredPostedDate++;
-          rejectWebCandidate(job, 'posted_date', 'outside requested posting-date window');
-          continue;
-        }
-        if (!salaryFilter(job.salary)) {
-          totalFilteredSalary++;
-          rejectWebCandidate(job, 'salary', 'outside configured salary filter');
-          continue;
-        }
-        if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
-          totalFilteredContent++;
-          rejectWebCandidate(job, 'content', 'outside configured content filter');
-          continue;
-        }
-        if (!countryEligibilityFilter(job.description)) {
-          totalFilteredCountryEligibility++;
-          rejectWebCandidate(job, 'country_eligibility', 'outside configured country eligibility');
-          continue;
-        }
-        if (!visaFilter(job.description)) {
-          totalFilteredVisa++;
-          rejectWebCandidate(job, 'visa', 'outside configured visa filter');
-          continue;
-        }
-        if (provider.id === 'websearch') {
-          webPending.push({ ...job, source: sourceName, tracked: false, careersUrlDomain: null });
-          continue;
-        }
-        const dedupUrl = normalizeUrlForDedup(job.url);
-        if (seenUrls.has(dedupUrl)) {
-          totalDupes++;
-          continue;
-        }
-        // Three lookups, not one, when the location joins the key. A bare key is
-        // a wildcard (see companyRoleDedupKey) and a wildcard has to match in
-        // BOTH directions, but the two directions are stored differently:
-        //
-        //   1. seed bare → candidate located. A source that recorded no location
-        //      (applications.md rarely has a Location column) contributed
-        //      `company::role`; a candidate keyed `company::role@@london` must
-        //      still be suppressed by it. That is the `has(baseKey)` lookup.
-        //   2. seed located → candidate bare. The reverse: history holds
-        //      `company::role@@london` and a provider now returns the same role
-        //      with its location field empty, so the candidate's own key IS
-        //      `baseKey` and matches neither stored entry. Without the third
-        //      lookup it is added as new — an already-applied role resurfacing,
-        //      which is the very thing the wildcard exists to stop.
-        //
-        // Case 2 is answered from a prebuilt index rather than by scanning
-        // seenCompanyRoles for the `${baseKey}@@` prefix: that set holds one
-        // entry per historical posting (thousands on an established install) and
-        // a prefix scan would walk all of them for every candidate of every
-        // company — O(candidates x history) added to a zero-token scan people
-        // run daily. seenCompanyRoleBases answers it in one hash lookup.
-        //
-        // Guarded on `key === baseKey` so it fires only for a locationless
-        // candidate: two candidates with DIFFERENT cities must stay distinct.
-        // `key === baseKey` whenever the flag is off, and the index is empty in
-        // that case, so the default path is unchanged.
-        //
-        // An aggregator feed (portals.yml `aggregator: true`) names itself as
-        // the company, so two same-titled posts are two employers' jobs: only
-        // the URL dedups there, and the key is null.
-        const baseKey = companyRoleDedupKey(job.company, job.title, canonicalizeCompany);
-        const key = company.aggregator === true
-          ? null
-          : (dedupIncludeLocation
-            ? companyRoleDedupKey(job.company, job.title, canonicalizeCompany, job.location)
-            : baseKey);
-        if (
-          key !== null && (
-            seenCompanyRoles.has(key) ||
-            seenCompanyRoles.has(baseKey) ||
-            (key === baseKey && seenCompanyRoleBases.has(baseKey))
-          )
-        ) {
-          totalDupes++;
-          continue;
-        }
-        const cooldownResult = cooldownFilter(job);
-        if (cooldownResult.skip) {
-          totalFilteredCooldown++;
-          cooldownOffers.push({
-            job: { ...job, source: sourceName },
-            status: cooldownResult.reason,
+          if (!titleFilter(job.title)) {
+            totalFilteredTitle++;
+            rejectWebCandidate(job, 'title', 'no positive title phrase matched');
+            auditSelection = 'FILTERED'; auditReason = 'title: no positive title phrase matched';
+            continue;
+          }
+          if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
+            totalFilteredTier++;
+            rejectWebCandidate(job, 'seniority_tier', 'excluded configured seniority tier');
+            auditSelection = 'FILTERED'; auditReason = 'seniority_tier: excluded configured seniority tier';
+            continue;
+          }
+          // iCIMS search cards can omit the country (or say only "Remote"). Its
+          // detail page has the structured work location and any binding
+          // relocation requirement. Read that before deciding US eligibility.
+          if (provider.id === 'icims' && provider.enrichDate) {
+            try { await provider.enrichDate(job, ctx); } catch { /* keep unknown location for review */ }
+          }
+          // job.title is passed so a role whose remoteness is stated in the title
+          // ("Program Manager - Remote") isn't rejected for a city-only location.
+          if (!locationFilter(job.location, job.url, job.title)) {
+            totalFilteredLocation++;
+            rejectWebCandidate(job, 'location', 'outside configured location filter');
+            auditSelection = 'FILTERED'; auditReason = 'location: outside configured location filter';
+            continue;
+          }
+          if (!postingAgeFilter(job.postedAt)) {
+            totalFilteredPostingAge++;
+            rejectWebCandidate(job, 'freshness', 'older than configured posting-age window');
+            auditSelection = 'FILTERED'; auditReason = 'freshness: older than configured posting-age window';
+            continue;
+          }
+          if (!postedDateFilter(job.postedAt)) {
+            totalFilteredPostedDate++;
+            rejectWebCandidate(job, 'posted_date', 'outside requested posting-date window');
+            auditSelection = 'FILTERED'; auditReason = 'posted_date: outside requested posting-date window';
+            continue;
+          }
+          if (!salaryFilter(job.salary)) {
+            totalFilteredSalary++;
+            rejectWebCandidate(job, 'salary', 'outside configured salary filter');
+            auditSelection = 'FILTERED'; auditReason = 'salary: outside configured salary filter';
+            continue;
+          }
+          if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
+            totalFilteredContent++;
+            rejectWebCandidate(job, 'content', 'outside configured content filter');
+            auditSelection = 'FILTERED'; auditReason = 'content: outside configured content filter';
+            continue;
+          }
+          if (!countryEligibilityFilter(job.description)) {
+            totalFilteredCountryEligibility++;
+            rejectWebCandidate(job, 'country_eligibility', 'outside configured country eligibility');
+            auditSelection = 'FILTERED'; auditReason = 'country_eligibility: outside configured country eligibility';
+            continue;
+          }
+          if (!visaFilter(job.description)) {
+            totalFilteredVisa++;
+            rejectWebCandidate(job, 'visa', 'outside configured visa filter');
+            auditSelection = 'FILTERED'; auditReason = 'visa: outside configured visa filter';
+            continue;
+          }
+          if (provider.id === 'websearch') {
+            auditSelection = 'DEFERRED'; auditReason = 'WEB_LIVENESS_REQUIRED';
+            webPending.push({ ...job, source: sourceName, tracked: false, careersUrlDomain: null });
+            continue;
+          }
+          const dedupUrl = normalizeUrlForDedup(job.url);
+          if (seenUrls.has(dedupUrl)) {
+            auditSelection = 'DUPLICATE'; auditReason = 'native deduplication';
+            totalDupes++;
+            continue;
+          }
+          // Three lookups, not one, when the location joins the key. A bare key is
+          // a wildcard (see companyRoleDedupKey) and a wildcard has to match in
+          // BOTH directions, but the two directions are stored differently:
+          //
+          //   1. seed bare → candidate located. A source that recorded no location
+          //      (applications.md rarely has a Location column) contributed
+          //      `company::role`; a candidate keyed `company::role@@london` must
+          //      still be suppressed by it. That is the `has(baseKey)` lookup.
+          //   2. seed located → candidate bare. The reverse: history holds
+          //      `company::role@@london` and a provider now returns the same role
+          //      with its location field empty, so the candidate's own key IS
+          //      `baseKey` and matches neither stored entry. Without the third
+          //      lookup it is added as new — an already-applied role resurfacing,
+          //      which is the very thing the wildcard exists to stop.
+          //
+          // Case 2 is answered from a prebuilt index rather than by scanning
+          // seenCompanyRoles for the `${baseKey}@@` prefix: that set holds one
+          // entry per historical posting (thousands on an established install) and
+          // a prefix scan would walk all of them for every candidate of every
+          // company — O(candidates x history) added to a zero-token scan people
+          // run daily. seenCompanyRoleBases answers it in one hash lookup.
+          //
+          // Guarded on `key === baseKey` so it fires only for a locationless
+          // candidate: two candidates with DIFFERENT cities must stay distinct.
+          // `key === baseKey` whenever the flag is off, and the index is empty in
+          // that case, so the default path is unchanged.
+          //
+          // An aggregator feed (portals.yml `aggregator: true`) names itself as
+          // the company, so two same-titled posts are two employers' jobs: only
+          // the URL dedups there, and the key is null.
+          const baseKey = companyRoleDedupKey(job.company, job.title, canonicalizeCompany);
+          const key = company.aggregator === true
+            ? null
+            : (dedupIncludeLocation
+              ? companyRoleDedupKey(job.company, job.title, canonicalizeCompany, job.location)
+              : baseKey);
+          if (
+            key !== null && (
+              seenCompanyRoles.has(key) ||
+              seenCompanyRoles.has(baseKey) ||
+              (key === baseKey && seenCompanyRoleBases.has(baseKey))
+            )
+          ) {
+            auditSelection = 'DUPLICATE'; auditReason = 'native deduplication';
+            totalDupes++;
+            continue;
+          }
+          const cooldownResult = cooldownFilter(job);
+          if (cooldownResult.skip) {
+            auditSelection = 'FILTERED'; auditReason = 'cooldown';
+            totalFilteredCooldown++;
+            cooldownOffers.push({
+              job: { ...job, source: sourceName },
+              status: cooldownResult.reason,
+            });
+            continue;
+          }
+          // Mark as seen to avoid intra-scan dupes. The index is maintained in the
+          // same breath as the set it indexes, so a role first surfaced with a
+          // city THIS run also suppresses a locationless twin later in the run —
+          // not only across runs.
+          seenUrls.add(dedupUrl);
+          if (key !== null) {
+            seenCompanyRoles.add(key);
+            if (key !== baseKey) seenCompanyRoleBases.add(baseKey);
+          }
+          // Tag with the company's careers domain so verify can offer a 404/410
+          // rediscovery fallback. A null domain (no careers_url) marks the offer
+          // as broad-discovery — ineligible for the fallback, per the issue scope.
+          const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
+          auditSelection = 'ELIGIBLE'; auditReason = 'native Scanner survivor';
+          newOffers.push({
+            ...job,
+            source: sourceName,
+            tracked: Boolean(careersUrlDomain),
+            careersUrlDomain,
           });
-          continue;
-        }
-        // Mark as seen to avoid intra-scan dupes. The index is maintained in the
-        // same breath as the set it indexes, so a role first surfaced with a
-        // city THIS run also suppresses a locationless twin later in the run —
-        // not only across runs.
-        seenUrls.add(dedupUrl);
-        if (key !== null) {
-          seenCompanyRoles.add(key);
-          if (key !== baseKey) seenCompanyRoleBases.add(baseKey);
-        }
-        // Tag with the company's careers domain so verify can offer a 404/410
-        // rediscovery fallback. A null domain (no careers_url) marks the offer
-        // as broad-discovery — ineligible for the fallback, per the issue scope.
-        const careersUrlDomain = extractCareersUrlDomain(company.careers_url);
-        newOffers.push({
-          ...job,
-          source: sourceName,
-          tracked: Boolean(careersUrlDomain),
-          careersUrlDomain,
-        });
+        } finally { auditJob(job, auditSelection, auditReason, sourceName); }
       }
     } catch (err) {
+      if (err.code === 'SCAN_AUDIT_QUOTA') throw err;
       errors.push({
         company: company.name,
         error: err.message,
@@ -3535,11 +3556,11 @@ async function main() {
   const unreachableTargets = errors.filter((e) => e.kind === 'slug_gone');
   const networkTargets = errors.filter((e) => e.kind === 'network');
   const otherErrors = errors.filter((e) => e.kind !== 'slug_gone' && e.kind !== 'network');
-  
+
   const STREAK_THRESHOLD = config.portal_health_threshold || 3;
   const nowStr = new Date().toISOString();
   const healthRecords = [];
-  
+
   // Record each errored target under its real classifyFetchError kind. Before
   // this, only slug_gone/network were recorded and auth (401/403), server
   // (5xx), and unknown fell through to 'reachable' — so a portal WAF-403ing
@@ -3564,7 +3585,7 @@ async function main() {
   const persistentlyDead = [];
   const newlyDeadSlug = [];
   const newlyDeadNetwork = [];
-  
+
   // All error kinds can reach the 🚨 persistent list (auth/server/unknown
   // included — a WAF that 403s the scanner every run is coverage decay too).
   // Below threshold, only slug_gone/network keep their dedicated warnings;
